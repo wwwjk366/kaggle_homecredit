@@ -114,6 +114,39 @@ tr_te <- tr %>%
   left_join(avg_prev, by = "SK_ID_CURR") %>% 
   left_join(avg_install_pmt, by = "SK_ID_CURR") %>% 
   mutate_if(is.character, funs(factor(.) %>% as.integer())) %>% 
+  mutate(na = apply(., 1, function(x) sum(is.na(x))),
+         DAYS_EMPLOYED = ifelse(DAYS_EMPLOYED == 365243, NA, DAYS_EMPLOYED),
+         DAYS_EMPLOYED_PERC = sqrt(DAYS_EMPLOYED / DAYS_BIRTH),
+         INCOME_CREDIT_PERC = AMT_INCOME_TOTAL / AMT_CREDIT,
+         INCOME_PER_PERSON = log1p(AMT_INCOME_TOTAL / CNT_FAM_MEMBERS),
+         ANNUITY_INCOME_PERC = sqrt(AMT_ANNUITY / (1 + AMT_INCOME_TOTAL)),
+         LOAN_INCOME_RATIO = AMT_CREDIT / AMT_INCOME_TOTAL,
+         ANNUITY_LENGTH = AMT_CREDIT / AMT_ANNUITY,
+         CHILDREN_RATIO = CNT_CHILDREN / CNT_FAM_MEMBERS, 
+         CREDIT_TO_GOODS_RATIO = AMT_CREDIT / AMT_GOODS_PRICE,
+         INC_PER_CHLD = AMT_INCOME_TOTAL / (1 + CNT_CHILDREN),
+         SOURCES_PROD = EXT_SOURCE_1 * EXT_SOURCE_2 * EXT_SOURCE_3,
+         CAR_TO_BIRTH_RATIO = OWN_CAR_AGE / DAYS_BIRTH,
+         CAR_TO_EMPLOY_RATIO = OWN_CAR_AGE / DAYS_EMPLOYED,
+         PHONE_TO_BIRTH_RATIO = DAYS_LAST_PHONE_CHANGE / DAYS_BIRTH,
+         PHONE_TO_EMPLOY_RATIO = DAYS_LAST_PHONE_CHANGE / DAYS_EMPLOYED)
+
+docs <- str_subset(names(tr), "FLAG_DOC")
+live <- str_subset(names(tr), "(?!NFLAG_)(?!FLAG_DOC)(?!_FLAG_)FLAG_")
+inc_by_org <- tr_te %>% 
+  group_by(ORGANIZATION_TYPE) %>% 
+  summarise(m = median(AMT_INCOME_TOTAL)) %$% 
+  setNames(as.list(m), ORGANIZATION_TYPE)
+
+
+tr_te %<>% 
+  mutate(DOC_IND_KURT = apply(tr_te[, docs], 1, moments::kurtosis),
+         LIVE_IND_SUM = apply(tr_te[, live], 1, sum),
+         NEW_INC_BY_ORG = recode(tr_te$ORGANIZATION_TYPE, !!!inc_by_org),
+         NEW_EXT_SOURCES_MEAN = apply(tr_te[, c("EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3")], 1, mean),
+         NEW_SCORES_STD = apply(tr_te[, c("EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3")], 1, sd))%>%
+  mutate_all(funs(ifelse(is.nan(.), NA, .))) %>% 
+  mutate_all(funs(ifelse(is.infinite(.), NA, .))) %>% 
   data.matrix()
 
 # rm(tr, te, prev, avg_prev, bureau, avg_bureau, cred_card_bal, 
@@ -139,12 +172,13 @@ p <- list(objective = "binary:logistic",
           nthread = 16,
           eta = 0.025,
           max_depth = 5,
-          min_child_weight = 10,
+          min_child_weight = 20,
           gamma = 0,
           subsample = 0.8,
-          colsample_bytree = 0.8,
+          colsample_bytree = 0.7,
           alpha = 0,
           lambda = 0.05,
+          scale_pos_weight = 1,
           nrounds = 2000)
 
 m_xgb <- xgb.train(p, dtrain, p$nrounds, list(val = dval), print_every_n = 50, early_stopping_rounds = 200)
