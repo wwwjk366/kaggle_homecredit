@@ -1,10 +1,12 @@
 library(tidyverse)
 library(xgboost)
 library(magrittr)
+library(futile.logger)
+library(caret)
 set.seed(0)
 
 #---------------------------
-cat("Loading data...\n")
+futile.logger::flog.info("Loading data...")
 
 bbalance <- read_csv("input/bureau_balance.csv.zip") 
 bureau <- read_csv("input/bureau.csv.zip")
@@ -15,8 +17,23 @@ prev <- read_csv("input/previous_application.csv.zip")
 tr <- read_csv("input/application_train.csv.zip") 
 te <- read_csv("input/application_test.csv.zip")
 
+winsor <- function (x, multiple = 3){
+  
+  if (length(multiple) != 1 || multiple <= 0) {
+    stop("bad value for 'multiple'")
+  }
+  med <- median(x, na.rm = T)
+  y <- x - med
+  sc <- mad(y, center = 0) * multiple
+  y[y > sc] <- sc
+  y[y < -sc] <- -sc
+  y + med
+}
+
+
+
 #---------------------------
-cat("Preprocessing...\n")
+futile.logger::flog.info("Preprocessing and feature engineering...")
 
 # 
 # tr %<>% 
@@ -25,13 +42,13 @@ cat("Preprocessing...\n")
 #I commented out ones that kxx used for creating new variables (e.g. AMT_CREDIT / AMT_ANNUITY)
 #I am forced to do this because the score is poor if I don't.
 # 
-# #tr$AMT_INCOME_TOTAL <- log1p(tr$AMT_INCOME_TOTAL)
-# #tr$AMT_CREDIT <- log1p(tr$AMT_CREDIT)
+# tr$AMT_INCOME_TOTAL <- winsor(tr$AMT_INCOME_TOTAL)
+# tr$AMT_CREDIT <- winsor(tr$AMT_CREDIT)
 # #tr$AMT_ANNUITY <- log1p(tr$AMT_ANNUITY)
 # #tr$AMT_GOODS_PRICE <- log1p(tr$AMT_GOODS_PRICE)
 # tr$REGION_POPULATION_RELATIVE <- sqrt(tr$REGION_POPULATION_RELATIVE)
 # #tr$DAYS_BIRTH <- sqrt(abs(tr$DAYS_BIRTH))
-# #tr$DAYS_EMPLOYED <- sqrt(abs(tr$DAYS_EMPLOYED))
+# tr$DAYS_EMPLOYED <- winsor(tr$DAYS_EMPLOYED)
 # tr$DAYS_REGISTRATION <- sqrt(abs(tr$DAYS_REGISTRATION))
 # #tr$OWN_CAR_AGE <- sqrt(abs(tr$OWN_CAR_AGE))
 # tr$APARTMENTS_AVG <- log1p(50*tr$APARTMENTS_AVG)
@@ -54,13 +71,13 @@ cat("Preprocessing...\n")
 # tr$DEF_60_CNT_SOCIAL_CIRCLE <- (tr$DEF_60_CNT_SOCIAL_CIRCLE)^(1/7)
 # #tr$DAYS_LAST_PHONE_CHANGE <- (abs(tr$DAYS_LAST_PHONE_CHANGE))^(1/2)
 # 
-# #te$AMT_INCOME_TOTAL <- log1p(te$AMT_INCOME_TOTAL)
-# #te$AMT_CREDIT <- log1p(te$AMT_CREDIT)
+# te$AMT_INCOME_TOTAL <- winsor(te$AMT_INCOME_TOTAL)
+# te$AMT_CREDIT <- winsor(te$AMT_CREDIT)
 # #te$AMT_ANNUITY <- log1p(te$AMT_ANNUITY)
 # #te$AMT_GOODS_PRICE <- log1p(te$AMT_GOODS_PRICE)
 # te$REGION_POPULATION_RELATIVE <- sqrt(te$REGION_POPULATION_RELATIVE)
 # #te$DAYS_BIRTH <- sqrt(abs(te$DAYS_BIRTH))
-# #te$DAYS_EMPLOYED <- sqrt(abs(te$DAYS_EMPLOYED))
+# te$DAYS_EMPLOYED <- winsor(te$DAYS_EMPLOYED)
 # te$DAYS_REGISTRATION <- sqrt(abs(te$DAYS_REGISTRATION))
 # #te$OWN_CAR_AGE <- sqrt(abs(te$OWN_CAR_AGE))
 # te$APARTMENTS_AVG <- log1p(50*te$APARTMENTS_AVG)
@@ -114,7 +131,9 @@ sum_payments <- payments %>%
          DPD = DAYS_ENTRY_PAYMENT - DAYS_INSTALMENT,
          DBD = DAYS_INSTALMENT - DAYS_ENTRY_PAYMENT,
          DPD = ifelse(DPD > 0, DPD, 0),
-         DBD = ifelse(DBD > 0, DBD, 0)) %>% 
+         DBD = ifelse(DBD > 0, DBD, 0),
+         NUM_LESS_PAYMENT = ifelse(PAYMENT_DIFF>=0, 1,0)
+         ) %>% 
   group_by(SK_ID_CURR) %>% 
   summarise_all(fn) 
 # rm(payments); gc()
@@ -134,7 +153,9 @@ sum_prev <- prev %>%
          DAYS_LAST_DUE_1ST_VERSION = ifelse(DAYS_LAST_DUE_1ST_VERSION == 365243, NA, DAYS_LAST_DUE_1ST_VERSION),
          DAYS_LAST_DUE = ifelse(DAYS_LAST_DUE == 365243, NA, DAYS_LAST_DUE),
          DAYS_TERMINATION = ifelse(DAYS_TERMINATION == 365243, NA, DAYS_TERMINATION),
-         APP_CREDIT_PERC = AMT_APPLICATION / AMT_CREDIT) %>% 
+         APP_CREDIT_PERC = AMT_APPLICATION / AMT_CREDIT
+         
+         ) %>% 
   group_by(SK_ID_CURR) %>% 
   summarise_all(fn) 
 # rm(prev); gc()
@@ -167,7 +188,8 @@ tr_te <- tr %>%
          CAR_TO_BIRTH_RATIO = OWN_CAR_AGE / DAYS_BIRTH,
          CAR_TO_EMPLOY_RATIO = OWN_CAR_AGE / DAYS_EMPLOYED,
          PHONE_TO_BIRTH_RATIO = DAYS_LAST_PHONE_CHANGE / DAYS_BIRTH,
-         PHONE_TO_EMPLOY_RATIO = DAYS_LAST_PHONE_CHANGE / DAYS_EMPLOYED) 
+         PHONE_TO_EMPLOY_RATIO = DAYS_LAST_PHONE_CHANGE / DAYS_EMPLOYED
+         ) 
 
 docs <- str_subset(names(tr), "FLAG_DOC")
 live <- str_subset(names(tr), "(?!NFLAG_)(?!FLAG_DOC)(?!_FLAG_)FLAG_")
@@ -179,7 +201,37 @@ inc_by_org <- tr_te %>%
 # rm(tr, te, fn, sum_bureau, sum_cc_balance, 
 #    sum_payments, sum_pc_balance, sum_prev); gc()
 
-tr_te %<>% 
+# tr_te_to_imp <- tr_te %>% 
+#   select(EXT_SOURCE_1, EXT_SOURCE_2,EXT_SOURCE_3) 
+# 
+# knn_imp <- caret::preProcess(tr_te_to_imp, method = c("knnImpute"))
+# 
+# 
+# tr_te_imp <- predict(xxx, tr_te_to_imp)
+# tr_te_imp_knn <- predict(knn_imp, tr_te_to_imp)
+# 
+# df <- bind_rows(tr_te_imp, tr_te_to_imp %>% 
+#             filter(is.na(EXT_SOURCE_1),is.na(EXT_SOURCE_2),is.na(EXT_SOURCE_3))
+# )
+# 
+# Sys.setenv("PKG_CXXFLAGS"="-std=c++0x")
+# # devtools::install_github("alexwhitworth/imputation")
+# 
+# library("imputation")
+# t <- Sys.time()
+# tr_te_imp <- imputation::kNN_impute(tr_te_to_imp %>%
+#                                       top_n(100000),
+#                                     k = 5, 
+#                                     q= 2,
+#                                     verbose= FALSE,
+#                                     parallel= FALSE,
+#                                     n_canopies= 20)
+# Sys.time() - t
+# bind_cols(tr_te_to_imp %>% select(ID), tr_te_imp)
+
+
+tr_te %<>%
+  # bind_cols(tr_te_imp) %>% 
   mutate(DOC_IND_KURT = apply(tr_te[, docs], 1, moments::kurtosis),
          LIVE_IND_SUM = apply(tr_te[, live], 1, sum),
          NEW_INC_BY_ORG = recode(tr_te$ORGANIZATION_TYPE, !!!inc_by_org),
@@ -197,26 +249,26 @@ tr_te %<>%
          DAYS_BIRTH_2 = DAYS_BIRTH^2,
          DAYS_BIRTH_3 = DAYS_BIRTH^3,
          CREDIT_INCOME_PERCENT = AMT_CREDIT/AMT_INCOME_TOTAL,
-         CREDIT_TERM = AMT_ANNUITY/AMT_CREDIT
-         )%>%
+         CREDIT_TERM = AMT_CREDIT/AMT_ANNUITY
+  )%>%
+  mutate(
+    NEW_EXT_SOURCES_MEAN_sqrt = sqrt(NEW_EXT_SOURCES_MEAN),SOURCES_PROD_LOG =log(SOURCES_PROD/mean(SOURCES_PROD, na.rm = T)+0.1),
+    EXT1X2X3_LOG =log(EXT1X2X3/mean(EXT1X2X3, na.rm = T)+0.1),EXT1X3_LOG =log(EXT1X3/mean(EXT1X3, na.rm = T)+0.1),
+    SOURCES_PROD_sqrt = sqrt(SOURCES_PROD),EXT1X2X3_sqrt = sqrt(EXT1X2X3),EXT2X32_LOG =log(EXT2X32/mean(EXT2X32, na.rm = T)+0.1),
+    EXT2X3_sqrt = sqrt(EXT2X3),NEW_EXT_SOURCES_MEAN_sq = NEW_EXT_SOURCES_MEAN^2,EXT1X3_sqrt = sqrt(EXT1X3),
+    EXT22X3_LOG =log(EXT22X3/mean(EXT22X3, na.rm = T)+0.1),EXT2X32_sqrt = sqrt(EXT2X32),EXT22X3_sqrt = sqrt(EXT22X3),
+    NEW_EXT_SOURCES_MEAN_cube = NEW_EXT_SOURCES_MEAN^3,EXT1X2_sqrt = sqrt(EXT1X2),EXT1X22_LOG =log(EXT1X22/mean(EXT1X22, na.rm = T)+0.1),
+    EXT_SOURCE_3_sqrt = sqrt(EXT_SOURCE_3),EXT1X22_sqrt = sqrt(EXT1X22),EXT2X3XD_sqrt = sqrt(EXT2X3XD),EXT2XD_sqrt = sqrt(EXT2XD),
+    EXT_SOURCE_2_sqrt = sqrt(EXT_SOURCE_2),EXT2X3_sq = EXT2X3^2,EXT_SOURCE_1_sqrt = sqrt(EXT_SOURCE_1),EXT_SOURCE_3_sq = EXT_SOURCE_3^2
+    ) %>% 
   mutate_all(funs(ifelse(is.nan(.), NA, .))) %>% 
-  mutate_all(funs(ifelse(is.infinite(.), NA, .))) 
-  # select(features %>% filter(Gain > 0.003) %>% pull(Feature)) %>%  # less variable scored less
-
-tr_te_to_imp <- tr_te %>% 
-  select(feature_importance_1 %>% filter(Gain > 0.003) %>% pull(Feature)) 
-
-xxx <- caret::preProcess(tr_te_to_imp, method = c("knnImpute"))
-
-tr_te_imp <- predict(xxx, tr_te_to_imp)
-
-
-tr_te %<>% 
+  mutate_all(funs(ifelse(is.infinite(.), NA, .))) %>% 
   data.matrix()
 
 
 #---------------------------
-cat("Preparing data...\n")
+futile.logger::flog.info("Preparing data for model (separate train and test, etc)...")
+
 dtest <- xgb.DMatrix(data = tr_te[-tri, ])
 tr_te <- tr_te[tri, ]
 tri <- caret::createDataPartition(y, p = 0.9, list = F) %>% c()
@@ -231,7 +283,7 @@ cat("Training model...\n")
 p <- list(objective = "binary:logistic",
           booster = "gbtree",
           eval_metric = "auc",
-          nthread = 16,
+          nthread = 14,
           eta = 0.05,
           max_depth = 6,
           min_child_weight = 30,
@@ -247,15 +299,15 @@ p <- list(objective = "binary:logistic",
 set.seed(0)
 m_xgb <- xgb.train(p, dtrain, p$nrounds, list(val = dval), print_every_n = 50, early_stopping_rounds = 300)
 
-xgb.importance(cols, model=m_xgb) %>% write_csv(.,path = "feature_importance_1.csv")
+# xgb.importance(cols, model=m_xgb) %>% write_csv(.,path = "feature_importance_1.csv")
 
-
+saveRDS(m_xgb, paste0("xgb_v2_", round(m_xgb$best_score, 5), ".RDS"))
 
 #---------------------------
 read_csv("input/sample_submission.csv.zip") %>%
   mutate(SK_ID_CURR = as.integer(SK_ID_CURR),
          TARGET = predict(m_xgb, dtest)) %>%
-  write_csv(paste0("tidy_xgb_chuey_", round(m_xgb$best_score, 5), ".csv"))
+  write_csv(paste0("sub_xgb_v2_", round(m_xgb$best_score, 5), ".csv"))
 
 
 

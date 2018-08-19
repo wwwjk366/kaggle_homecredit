@@ -198,7 +198,7 @@ tr_te %<>%
          DAYS_BIRTH_3 = DAYS_BIRTH^3,
          CREDIT_INCOME_PERCENT = AMT_CREDIT/AMT_INCOME_TOTAL,
          CREDIT_TERM = AMT_ANNUITY/AMT_CREDIT
-         )%>%
+  )%>%
   mutate_all(funs(ifelse(is.nan(.), NA, .))) %>% 
   mutate_all(funs(ifelse(is.infinite(.), NA, .))) %>% 
   # select(features %>% filter(Gain > 0.003) %>% pull(Feature)) %>%  # less variable scored less

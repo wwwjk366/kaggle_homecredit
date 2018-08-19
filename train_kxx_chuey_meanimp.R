@@ -15,6 +15,21 @@ prev <- read_csv("input/previous_application.csv.zip")
 tr <- read_csv("input/application_train.csv.zip") 
 te <- read_csv("input/application_test.csv.zip")
 
+winsor <- function (x, multiple = 3){
+  
+  if (length(multiple) != 1 || multiple <= 0) {
+    stop("bad value for 'multiple'")
+  }
+  med <- median(x, na.rm = T)
+  y <- x - med
+  sc <- mad(y, center = 0) * multiple
+  y[y > sc] <- sc
+  y[y < -sc] <- -sc
+  y + med
+}
+
+
+
 #---------------------------
 cat("Preprocessing...\n")
 
@@ -25,13 +40,13 @@ cat("Preprocessing...\n")
 #I commented out ones that kxx used for creating new variables (e.g. AMT_CREDIT / AMT_ANNUITY)
 #I am forced to do this because the score is poor if I don't.
 # 
-# #tr$AMT_INCOME_TOTAL <- log1p(tr$AMT_INCOME_TOTAL)
-# #tr$AMT_CREDIT <- log1p(tr$AMT_CREDIT)
+tr$AMT_INCOME_TOTAL <- winsor(log1p(tr$AMT_INCOME_TOTAL))
+tr$AMT_CREDIT <- winsor(tr$AMT_CREDIT)
 # #tr$AMT_ANNUITY <- log1p(tr$AMT_ANNUITY)
 # #tr$AMT_GOODS_PRICE <- log1p(tr$AMT_GOODS_PRICE)
 # tr$REGION_POPULATION_RELATIVE <- sqrt(tr$REGION_POPULATION_RELATIVE)
 # #tr$DAYS_BIRTH <- sqrt(abs(tr$DAYS_BIRTH))
-# #tr$DAYS_EMPLOYED <- sqrt(abs(tr$DAYS_EMPLOYED))
+tr$DAYS_EMPLOYED <- winsor(sqrt(abs(tr$DAYS_EMPLOYED)))
 # tr$DAYS_REGISTRATION <- sqrt(abs(tr$DAYS_REGISTRATION))
 # #tr$OWN_CAR_AGE <- sqrt(abs(tr$OWN_CAR_AGE))
 # tr$APARTMENTS_AVG <- log1p(50*tr$APARTMENTS_AVG)
@@ -54,13 +69,13 @@ cat("Preprocessing...\n")
 # tr$DEF_60_CNT_SOCIAL_CIRCLE <- (tr$DEF_60_CNT_SOCIAL_CIRCLE)^(1/7)
 # #tr$DAYS_LAST_PHONE_CHANGE <- (abs(tr$DAYS_LAST_PHONE_CHANGE))^(1/2)
 # 
-# #te$AMT_INCOME_TOTAL <- log1p(te$AMT_INCOME_TOTAL)
-# #te$AMT_CREDIT <- log1p(te$AMT_CREDIT)
+te$AMT_INCOME_TOTAL <- winsor(log1p(te$AMT_INCOME_TOTAL))
+te$AMT_CREDIT <- winsor(te$AMT_CREDIT)
 # #te$AMT_ANNUITY <- log1p(te$AMT_ANNUITY)
 # #te$AMT_GOODS_PRICE <- log1p(te$AMT_GOODS_PRICE)
 # te$REGION_POPULATION_RELATIVE <- sqrt(te$REGION_POPULATION_RELATIVE)
 # #te$DAYS_BIRTH <- sqrt(abs(te$DAYS_BIRTH))
-# #te$DAYS_EMPLOYED <- sqrt(abs(te$DAYS_EMPLOYED))
+te$DAYS_EMPLOYED <- winsor(sqrt(abs(te$DAYS_EMPLOYED)))
 # te$DAYS_REGISTRATION <- sqrt(abs(te$DAYS_REGISTRATION))
 # #te$OWN_CAR_AGE <- sqrt(abs(te$OWN_CAR_AGE))
 # te$APARTMENTS_AVG <- log1p(50*te$APARTMENTS_AVG)
@@ -167,7 +182,8 @@ tr_te <- tr %>%
          CAR_TO_BIRTH_RATIO = OWN_CAR_AGE / DAYS_BIRTH,
          CAR_TO_EMPLOY_RATIO = OWN_CAR_AGE / DAYS_EMPLOYED,
          PHONE_TO_BIRTH_RATIO = DAYS_LAST_PHONE_CHANGE / DAYS_BIRTH,
-         PHONE_TO_EMPLOY_RATIO = DAYS_LAST_PHONE_CHANGE / DAYS_EMPLOYED) 
+         PHONE_TO_EMPLOY_RATIO = DAYS_LAST_PHONE_CHANGE / DAYS_EMPLOYED
+         ) 
 
 docs <- str_subset(names(tr), "FLAG_DOC")
 live <- str_subset(names(tr), "(?!NFLAG_)(?!FLAG_DOC)(?!_FLAG_)FLAG_")
@@ -179,7 +195,37 @@ inc_by_org <- tr_te %>%
 # rm(tr, te, fn, sum_bureau, sum_cc_balance, 
 #    sum_payments, sum_pc_balance, sum_prev); gc()
 
-tr_te %<>% 
+# tr_te_to_imp <- tr_te %>% 
+#   select(EXT_SOURCE_1, EXT_SOURCE_2,EXT_SOURCE_3) 
+# 
+# knn_imp <- caret::preProcess(tr_te_to_imp, method = c("knnImpute"))
+# 
+# 
+# tr_te_imp <- predict(xxx, tr_te_to_imp)
+# tr_te_imp_knn <- predict(knn_imp, tr_te_to_imp)
+# 
+# df <- bind_rows(tr_te_imp, tr_te_to_imp %>% 
+#             filter(is.na(EXT_SOURCE_1),is.na(EXT_SOURCE_2),is.na(EXT_SOURCE_3))
+# )
+# 
+# Sys.setenv("PKG_CXXFLAGS"="-std=c++0x")
+# # devtools::install_github("alexwhitworth/imputation")
+# 
+# library("imputation")
+# t <- Sys.time()
+# tr_te_imp <- imputation::kNN_impute(tr_te_to_imp %>%
+#                                       top_n(100000),
+#                                     k = 5, 
+#                                     q= 2,
+#                                     verbose= FALSE,
+#                                     parallel= FALSE,
+#                                     n_canopies= 20)
+# Sys.time() - t
+# bind_cols(tr_te_to_imp %>% select(ID), tr_te_imp)
+
+
+tr_te %<>%
+  # bind_cols(tr_te_imp) %>% 
   mutate(DOC_IND_KURT = apply(tr_te[, docs], 1, moments::kurtosis),
          LIVE_IND_SUM = apply(tr_te[, live], 1, sum),
          NEW_INC_BY_ORG = recode(tr_te$ORGANIZATION_TYPE, !!!inc_by_org),
@@ -194,24 +240,22 @@ tr_te %<>%
          EXT1X3 = EXT_SOURCE_1*EXT_SOURCE_3,
          EXT2XD = EXT_SOURCE_2*DAYS_BIRTH,
          EXT1X22 = EXT_SOURCE_1*EXT_SOURCE_2^2,
+         # EXT2X3_imp = EXT_SOURCE_21*EXT_SOURCE_31,
+         # EXT1X2X3_imp = EXT_SOURCE_11*EXT_SOURCE_21*EXT_SOURCE_31,
+         # EXT2X3XD_imp = EXT_SOURCE_11 * EXT_SOURCE_21 *DAYS_BIRTH,
+         # EXT22X3_imp = EXT_SOURCE_21^2 *EXT_SOURCE_31,
+         # EXT2X32_imp = EXT_SOURCE_21*EXT_SOURCE_31^2,
+         # EXT1X2_imp = EXT_SOURCE_11*EXT_SOURCE_21,
+         # EXT1X3_imp = EXT_SOURCE_11*EXT_SOURCE_31,
+         # EXT2XD_imp = EXT_SOURCE_21*DAYS_BIRTH,
+         # EXT1X22_imp = EXT_SOURCE_11*EXT_SOURCE_21^2,
          DAYS_BIRTH_2 = DAYS_BIRTH^2,
          DAYS_BIRTH_3 = DAYS_BIRTH^3,
          CREDIT_INCOME_PERCENT = AMT_CREDIT/AMT_INCOME_TOTAL,
-         CREDIT_TERM = AMT_ANNUITY/AMT_CREDIT
-         )%>%
+         CREDIT_TERM = AMT_CREDIT/AMT_ANNUITY
+  )%>%
   mutate_all(funs(ifelse(is.nan(.), NA, .))) %>% 
-  mutate_all(funs(ifelse(is.infinite(.), NA, .))) 
-  # select(features %>% filter(Gain > 0.003) %>% pull(Feature)) %>%  # less variable scored less
-
-tr_te_to_imp <- tr_te %>% 
-  select(feature_importance_1 %>% filter(Gain > 0.003) %>% pull(Feature)) 
-
-xxx <- caret::preProcess(tr_te_to_imp, method = c("knnImpute"))
-
-tr_te_imp <- predict(xxx, tr_te_to_imp)
-
-
-tr_te %<>% 
+  mutate_all(funs(ifelse(is.infinite(.), NA, .))) %>% 
   data.matrix()
 
 
@@ -249,13 +293,13 @@ m_xgb <- xgb.train(p, dtrain, p$nrounds, list(val = dval), print_every_n = 50, e
 
 xgb.importance(cols, model=m_xgb) %>% write_csv(.,path = "feature_importance_1.csv")
 
-
+saveRDS(m_xgb, paste0("xgb_mediam_imp_", round(m_xgb$best_score, 5), ".RDS"))
 
 #---------------------------
 read_csv("input/sample_submission.csv.zip") %>%
   mutate(SK_ID_CURR = as.integer(SK_ID_CURR),
          TARGET = predict(m_xgb, dtest)) %>%
-  write_csv(paste0("tidy_xgb_chuey_", round(m_xgb$best_score, 5), ".csv"))
+  write_csv(paste0("sub_xgb_mediam_imp_", round(m_xgb$best_score, 5), ".csv"))
 
 
 
